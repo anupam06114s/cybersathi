@@ -7,6 +7,7 @@ import {
   FaBus,
   FaCar,
   FaClock,
+  FaCompass,
   FaCrosshairs,
   FaExclamationTriangle,
   FaExternalLinkAlt,
@@ -18,7 +19,10 @@ import {
 } from "react-icons/fa";
 import {
   cleanAddressForMaps,
+  compassBearing,
+  extractLocationForGeocoding,
   formatAddress,
+  haversineDistanceKm,
   type ApiRecord,
   type PhoneLookupResponse,
 } from "@/lib/phone-lookup";
@@ -81,7 +85,10 @@ function formatDuration(minutes: number): string {
 
 interface Destination {
   id: string;
-  address: string;
+  /** Display address — formatted with all parts for showing in UI. */
+  displayAddress: string;
+  /** Location-only string — village/district/pincode for geocoding. */
+  geocodeAddress: string;
   name: string;
   circle: string;
   source: "main" | "alt";
@@ -96,7 +103,12 @@ interface Destination {
  */
 const MAX_DESTINATIONS = 8;
 
-/** Result me se address wale records nikaalta hai (upar wali seema tak). */
+/**
+ * Result me se address wale records nikaalta hai (upar wali seema tak).
+ *
+ * Father's name aur person names ko address se hata diya jaata hai, sirf
+ * village / district / city / pincode rakhte hain taaki geocoding sahi ho.
+ */
 function collectDestinations(result: PhoneLookupResponse | null): Destination[] {
   if (!result?.ok) return [];
 
@@ -104,15 +116,26 @@ function collectDestinations(result: PhoneLookupResponse | null): Destination[] 
     record: ApiRecord,
     source: "main" | "alt",
     index: number
-  ): Destination => ({
-    id: `${source}-${index}`,
-    address: cleanAddressForMaps(formatAddress(record.address)),
-    name: record.name?.trim() || "Unknown",
-    circle: record.circle?.trim() || "",
-    source,
-  });
+  ): Destination => {
+    const displayAddr = cleanAddressForMaps(formatAddress(record.address));
+    // Geocoding ke liye sirf location parts — person names hata do
+    const geoAddr = extractLocationForGeocoding(
+      record.address,
+      record.fname,
+      record.name
+    );
+    return {
+      id: `${source}-${index}`,
+      displayAddress: displayAddr,
+      geocodeAddress: geoAddr || displayAddr,
+      name: record.name?.trim() || "Unknown",
+      circle: record.circle?.trim() || "",
+      source,
+    };
+  };
 
-  const usable = (d: Destination) => d.address && d.address !== "Not Available";
+  const usable = (d: Destination) =>
+    d.geocodeAddress && d.geocodeAddress !== "Not Available";
 
   const main = (result.apiData?.Main_Records ?? [])
     .slice(0, MAX_DESTINATIONS)
@@ -174,30 +197,30 @@ export function TrackLocationView({
     destinations.find((d) => d.id === selectedId) ?? destinations[0] ?? null;
 
   const geocodeForDestination =
-    geocoded && destination && geocoded.address === destination.address
+    geocoded && destination && geocoded.address === destination.geocodeAddress
       ? geocoded
       : null;
   const destCoords = geocodeForDestination?.coords ?? null;
 
-  // Destination ke coordinates — routing ke liye zaroori hain.
+  // Destination ke coordinates — geocodeAddress (sirf village/district) se.
   React.useEffect(() => {
     if (!destination) return;
-    const { address } = destination;
+    const geoAddr = destination.geocodeAddress;
     let cancelled = false;
 
-    fetch(`/api/geocode?q=${encodeURIComponent(address)}`)
+    fetch(`/api/geocode?q=${encodeURIComponent(geoAddr)}`)
       .then((r) => r.json())
       .then((data) => {
         if (cancelled) return;
         setGeocoded({
-          address,
+          address: geoAddr,
           coords: data.ok ? { lat: data.lat, lon: data.lon } : null,
         });
       })
       .catch(() => {
         // Coordinates na milen to bhi map chalta rahega — Google khud address
         // dhoondh leta hai, jo Indian addresses par Nominatim se behtar hai.
-        if (!cancelled) setGeocoded({ address, coords: null });
+        if (!cancelled) setGeocoded({ address: geoAddr, coords: null });
       });
 
     return () => {
@@ -361,7 +384,7 @@ export function TrackLocationView({
   // khulta hai, address dhoondhne ka step hi nahi aata.
   const destParam = destCoords
     ? `${destCoords.lat},${destCoords.lon}`
-    : (destination?.address ?? "");
+    : (destination?.geocodeAddress ?? "");
 
   const embedSrc = isReady
     ? `https://maps.google.com/maps?saddr=${encodeURIComponent(originParam)}` +
@@ -372,6 +395,25 @@ export function TrackLocationView({
     ? `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(originParam)}` +
       `&destination=${encodeURIComponent(destParam)}&travelmode=${mode.travelmode}`
     : "";
+
+  // Straight-line distance aur compass direction
+  const straightLine =
+    isReady && destCoords
+      ? {
+          km: haversineDistanceKm(
+            origin.coords.lat,
+            origin.coords.lon,
+            destCoords.lat,
+            destCoords.lon
+          ),
+          dir: compassBearing(
+            origin.coords.lat,
+            origin.coords.lon,
+            destCoords.lat,
+            destCoords.lon
+          ),
+        }
+      : null;
 
   const visibleSteps =
     route.status === "ready"
@@ -395,14 +437,13 @@ export function TrackLocationView({
           </span>
           <div className="min-w-0 flex-1">
             <p className="text-[9.5px] font-black uppercase tracking-wider text-rose-300/80">
-              Destination · from the fetched record
+              Destination · location from record
             </p>
             <p className="mt-0.5 text-[12.5px] font-bold leading-snug text-white">
-              {destination!.address}
+              {destination!.geocodeAddress}
             </p>
             <p className="mt-0.5 text-[11px] text-white/50">
-              {destination!.name}
-              {destination!.circle ? ` · ${destination!.circle}` : ""}
+              {destination!.circle ? `${destination!.circle}` : ""}
             </p>
           </div>
         </div>
@@ -511,9 +552,9 @@ export function TrackLocationView({
       ) : (
         <>
           {/* ------------------------ Route summary ------------------------ */}
-          <div className="grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-4">
+          <div className="grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
             <SummaryTile
-              label="Total distance"
+              label="Road distance"
               value={
                 route.status === "ready"
                   ? `${route.distanceKm} km`
@@ -523,6 +564,28 @@ export function TrackLocationView({
               }
               accent="text-emerald-300"
               icon={<FaRoute size={11} />}
+            />
+            <SummaryTile
+              label="Straight line"
+              value={
+                straightLine
+                  ? `${straightLine.km.toFixed(1)} km`
+                  : destCoords
+                    ? "..."
+                    : "Not available"
+              }
+              accent="text-violet-300"
+              icon={<FaMapMarkerAlt size={11} />}
+            />
+            <SummaryTile
+              label="Direction"
+              value={
+                straightLine
+                  ? `${straightLine.dir} (${straightLine.dir === "N" ? "North" : straightLine.dir === "NE" ? "North-East" : straightLine.dir === "E" ? "East" : straightLine.dir === "SE" ? "South-East" : straightLine.dir === "S" ? "South" : straightLine.dir === "SW" ? "South-West" : straightLine.dir === "W" ? "West" : "North-West"})`
+                  : "Not available"
+              }
+              accent="text-rose-300"
+              icon={<FaCompass size={11} />}
             />
             <SummaryTile
               label="Travel time"
@@ -535,12 +598,6 @@ export function TrackLocationView({
               }
               accent="text-amber-300"
               icon={<FaClock size={11} />}
-            />
-            <SummaryTile
-              label="Starting point"
-              value={origin.label}
-              accent="text-sky-300"
-              icon={<FaCrosshairs size={11} />}
             />
             <button
               type="button"
@@ -586,7 +643,7 @@ export function TrackLocationView({
             <iframe
               key={`${destination!.id}-${mode.id}-${originParam}`}
               src={embedSrc}
-              title={`Route from ${origin.label} to ${destination!.address}`}
+              title={`Route from ${origin.label} to ${destination!.geocodeAddress}`}
               loading="lazy"
               referrerPolicy="no-referrer-when-downgrade"
               className="h-[360px] w-full border-0"

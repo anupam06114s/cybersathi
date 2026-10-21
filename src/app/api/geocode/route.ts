@@ -16,7 +16,7 @@ export const revalidate = 86400;
 const NOMINATIM = "https://nominatim.openstreetmap.org/search";
 const USER_AGENT = "CyberSathi/1.0 (cyber crime victim assistance tool)";
 /** Nominatim ki policy: 1 request per second. Isliye attempts seemit rakhe hain. */
-const MAX_ATTEMPTS = 3;
+const MAX_ATTEMPTS = 4;
 const GAP_MS = 1100;
 
 interface NominatimHit {
@@ -49,6 +49,19 @@ function buildCandidates(address: string): { q: string; precision: Precision }[]
   // pehchanta, par uske baad ka landmark aksar seedha mil jaata hai.
   if (parts.length > 2) {
     candidates.push({ q: parts.slice(1, 4).join(", "), precision: "landmark" });
+  }
+
+  // Aakhri 2-3 parts aksar district + state hote hain — zyada reliable.
+  if (parts.length > 3) {
+    candidates.push({
+      q: parts.slice(-3).join(", ") + ", India",
+      precision: "landmark",
+    });
+  } else if (parts.length > 2) {
+    candidates.push({
+      q: parts.slice(-2).join(", ") + ", India",
+      precision: "landmark",
+    });
   }
 
   const pincode = address.match(/(\d{6})/)?.[1];

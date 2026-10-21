@@ -133,6 +133,137 @@ export function cleanAddressForMaps(rawAddress: string): string {
 }
 
 /**
+ * Indian location keywords — agar koi address part me ye milein to wo
+ * geographic hai, person name nahi.
+ */
+const LOCATION_KEYWORDS = /\b(village|vill|vpo|post|tehsil|teh|dist|district|block|mandal|taluk|taluka|thana|ps|sector|colony|nagar|puram|pur|abad|ganj|garh|ghar|kheda|wadi|wala|mohalla|tola|ward|town|city|state|pradesh|bihar|jharkhand|odisha|maharashtra|rajasthan|gujarat|punjab|haryana|uttarakhand|uttar|madhya|andhra|telangana|karnataka|tamil|kerala|assam|bengal|sikkim|manipur|meghalaya|mizoram|nagaland|tripura|arunachal|goa|chhattisgarh|himachal|jammu|kashmir|ladakh|delhi|mumbai|kolkata|chennai|hyderabad|bangalore|bengaluru|pune|ahmedabad|jaipur|lucknow|kanpur|patna|indore|bhopal|ludhiana|agra|varanasi|allahabad|prayagraj|surat|nagpur|noida|gurgaon|gurugram|faridabad|ghaziabad|chandigarh|road|marg|chowk|bazaar|bazar|market|lane|gali|main|cross|circle|square|bridge|flyover|highway|nh|sh)\b/i;
+
+/**
+ * Pincode pattern — 6-digit Indian postal code.
+ */
+const PINCODE_RE = /\b\d{6}\b/;
+
+/**
+ * Address se sirf village / district / city / state / pincode nikaalti hai —
+ * person ka naam ya flat number hata deti hai, taaki geocoding sahi ho.
+ *
+ * Telecom records ka address aksar aise aata hai:
+ *   "Flat 1506!Ram Kumar!Village Khera!Dist Meerut!UP!250001"
+ * Is function se output hoga: "Village Khera, Dist Meerut, UP, 250001"
+ */
+export function extractLocationForGeocoding(
+  rawAddress?: string | null,
+  fname?: string | null,
+  name?: string | null
+): string {
+  if (!rawAddress) return "";
+
+  // Split on '!' delimiters first, then commas
+  let parts = rawAddress
+    .split(/[!,]/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0 && p !== "." && p !== "-" && p !== "0");
+
+  // Remove parts that match the person's name or father's name
+  const namesToRemove = [fname, name]
+    .filter(Boolean)
+    .map((n) => n!.trim().toLowerCase())
+    .filter((n) => n.length > 1);
+
+  parts = parts.filter((part) => {
+    const lower = part.toLowerCase();
+    // Exact match with a name — skip it
+    for (const n of namesToRemove) {
+      if (lower === n) return false;
+      // Also catch "S/O Ram Kumar", "D/O Sita", "W/O xyz" patterns
+      if (/^[sdwc]\/o\s/i.test(part)) return false;
+    }
+    return true;
+  });
+
+  // Filter out parts that look like flat/tower/house numbers without location keywords
+  const locationParts = parts.filter((part) => {
+    // Keep if it contains a location keyword
+    if (LOCATION_KEYWORDS.test(part)) return true;
+    // Keep if it contains a pincode
+    if (PINCODE_RE.test(part)) return true;
+    // Keep if it looks like a state abbreviation (2-3 uppercase letters)
+    if (/^[A-Z]{2,3}$/.test(part.trim())) return true;
+    // Discard short numeric parts (flat no, tower no, etc.)
+    if (/^\d{1,4}$/.test(part.trim())) return false;
+    // Discard parts that start with flat/tower/house/room/floor
+    if (/^(flat|tower|house|room|floor|bldg|building|plot|no|h\.no|hno)\b/i.test(part))
+      return false;
+    // Keep if it has 2+ words (likely a place name)
+    if (part.trim().split(/\s+/).length >= 2) return true;
+    // Keep longer single words (likely place names)
+    if (part.trim().length >= 4) return true;
+    return false;
+  });
+
+  // If we stripped too aggressively, fall back to pincode + India
+  if (locationParts.length === 0) {
+    const pincode = rawAddress.match(PINCODE_RE)?.[0];
+    return pincode ? `${pincode}, India` : "";
+  }
+
+  // Clean and deduplicate
+  const cleaned = cleanAddressForMaps(locationParts.join(", "));
+  return cleaned || "";
+}
+
+/**
+ * Do coordinates ke beech compass direction (N, NE, E, SE, S, SW, W, NW)
+ * nikaalta hai — bearing ke hisaab se.
+ */
+export function compassBearing(
+  fromLat: number,
+  fromLon: number,
+  toLat: number,
+  toLon: number
+): string {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+
+  const dLon = toRad(toLon - fromLon);
+  const lat1 = toRad(fromLat);
+  const lat2 = toRad(toLat);
+
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x =
+    Math.cos(lat1) * Math.sin(lat2) -
+    Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+
+  let bearing = (Math.atan2(y, x) * 180) / Math.PI;
+  bearing = (bearing + 360) % 360;
+
+  const DIRS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"] as const;
+  const idx = Math.round(bearing / 45) % 8;
+  return DIRS[idx];
+}
+
+/**
+ * Haversine formula se do coordinates ke beech ka straight-line distance
+ * (in km) nikaalta hai.
+ */
+export function haversineDistanceKm(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const R = 6371; // Earth radius in km
+
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/**
  * Extracts digits only or clean phone number suitable for the API.
  */
 export function cleanPhoneNumber(rawInput: string): string {
